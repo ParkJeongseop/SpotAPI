@@ -10,6 +10,9 @@ from spotapi.types.alias import _UStr, _Undefined
 from spotapi.exceptions import BaseClientError
 from spotapi.http.request import TLSClient
 from spotapi.utils.strings import parse_json_string
+from seleniumwire import webdriver
+import json
+import gzip
 
 __all__ = ["BaseClient", "BaseClientError"]
 
@@ -98,25 +101,47 @@ class BaseClient:
 
     def _get_auth_vars(self) -> None:
         if self.access_token is _Undefined or self.client_id is _Undefined:
-            totp, timestamp = generate_totp()
-            query = {
-                "reason": "init",
-                "productType": "web-player",
-                "totp": totp,
-                "totpVer": 5,
-                "ts": timestamp,
-            }
-            resp = self.client.get(
-                "https://open.spotify.com/api/token", params=query
-            )
-
-            if resp.fail:
+            options = webdriver.ChromeOptions()
+            options.add_argument('--headless')
+            
+            driver = webdriver.Chrome(options=options)
+            driver.get("https://open.spotify.com/")
+            
+            token_found = False
+            max_wait_time = 30
+            start_time = time.time()
+            
+            while not token_found and (time.time() - start_time) < max_wait_time:
+                for request in driver.requests:
+                    if 'api/token' in request.url:
+                        if request.response:
+                            try:
+                                response_body = request.response.body
+                                
+                                if response_body[:2] == b'\x1f\x8b':
+                                    response_body = gzip.decompress(response_body)
+                                
+                                response_text = response_body.decode('utf-8')
+                                token_response = json.loads(response_text)
+                                
+                                self.access_token = token_response.get("accessToken")
+                                self.client_id = token_response.get("clientId")
+                                token_found = True
+                                break
+                                
+                            except (UnicodeDecodeError, json.JSONDecodeError, gzip.BadGzipFile) as e:
+                                raise BaseClientError("Could not get session auth tokens", error=e)
+                
+                if not token_found:
+                    time.sleep(0.1)
+            
+            driver.quit()
+            
+            if not token_found:
                 raise BaseClientError(
-                    "Could not get session auth tokens", error=resp.error.string
+                    "Could not get session auth tokens", error="token not found"
                 )
 
-            self.access_token = resp.response["accessToken"]
-            self.client_id = resp.response["clientId"]
 
     def get_session(self) -> None:
         resp = self.client.get("https://open.spotify.com")
